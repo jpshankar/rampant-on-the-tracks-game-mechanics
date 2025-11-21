@@ -45,7 +45,7 @@ export default class GameMechanicsDemo extends Scene
     }
 
     preload() {
-        this.load.setPath("rampant-on-the-tracks-game-mechanics/assets");
+        this.load.setPath("assets");
 
         this.load.image("grid_point", "grid_point.png");
         
