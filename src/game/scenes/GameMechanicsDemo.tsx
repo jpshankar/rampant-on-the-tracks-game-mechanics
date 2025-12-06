@@ -1,44 +1,43 @@
 import { Scene } from 'phaser';
 import { EventBus } from '../EventBus';
 
-import Point from '@/game/entities/points/Point';
-import PointGrid from '@/game/entities/points/PointGrid';
+import PointData from '@/game/entities/points/PointData';
+import PointMap from '@/game/entities/points/PointMap';
 import PointType from '@/game/entities/points/PointType';
-import PointTypeOverride from '@/game/entities/points/PointTypeOverride';
 
-import StepDirection from '@/game/entities/walker/StepDirection';
+import RegionData from '@/game/entities/points/regions/RegionData';
+
 import Walker from '@/game/entities/walker/Walker';
-import SteppingState from '../entities/walker/SteppingState';
+import PointNeighborData from '../entities/points/PointNeighborData';
 
-const pointsInRow = 8;
-const pointsInCol = 8;
-
-const xyOffset = 45;
 const numWalkerSteps = 25;
-
-const playerStartColIndex = 2;
-const playerStartRowIndex = 5;
-
 const textStyle = {color: "black"};
 
 // This specifies Destinations - it can also help specify unchangeable Redirects (PointGrid refactoring needed for actual unchangability.)
-const pointTypeOverrides: PointTypeOverride[] = [
-    {
-        pointXy: new Phaser.Math.Vector2(5, 2),
-        pointType: PointType.Destination
-    }
-];
+const pointTypeOverrides: Map<string, PointType> = new Map([
+    ["6a1cd69c-c065-4b70-94d3-263902cc5fe8", PointType.Destination]
+]);
+
+const playerStartPointId = "edfd247f-8535-4909-92d8-98b9174f0348";
 
 export default class GameMechanicsDemo extends Scene
 {
-    pointGrid: PointGrid;
+    pointMap: PointMap;
     walker: Walker;
+
+    verticesMap: Map<string, Phaser.Math.Vector2>;
+    neighborsMap: Map<string, PointNeighborData[]> = new Map<string, PointNeighborData[]>();
+
+    redirectsMap: Map<string, PointNeighborData> = new Map<string, PointNeighborData>();
 
     stepsText: Phaser.GameObjects.Text;
     destinationsText: Phaser.GameObjects.Text;
 
     destinatationsArrivedAt: number = 0;
     numDestinations: number;
+
+    sceneWidth: number;
+    sceneHeight: number;
 
     constructor () {
         super('GameMechanicsDemo');
@@ -48,101 +47,150 @@ export default class GameMechanicsDemo extends Scene
         this.load.setPath("assets");
 
         this.load.image("grid_point", "grid_point.png");
-        
         this.load.image("grid_point_blocked", "grid_point_blocked.png");
-
-        this.load.image("grid_point_redirect_north", "grid_point_redirect_north.png");
-        this.load.image("grid_point_redirect_east", "grid_point_redirect_east.png");
-        this.load.image("grid_point_redirect_south", "grid_point_redirect_south.png");
-        this.load.image("grid_point_redirect_west", "grid_point_redirect_west.png");
 
         this.load.image("walker", "walker.png");
         this.load.image("walker_destination", "walker_destination.png");
+
+        this.load.setPath("json");
+        this.load.json("walker_map", "walker_map.json");
     }
 
-    _determineWalkerOverlapWithDestination(walker: Walker): boolean {
-        const walkerPosition = walker.currentCoords;
-        const walkerDestination = walker.destinationCoords;
-        
-        // Overlap = complete overlap. 
-        switch(walker.currentStepDirection) {
-            case StepDirection.North: return walkerPosition.y <= walkerDestination.y;
-            case StepDirection.East: return walkerPosition.x >= walkerDestination.x;
-            case StepDirection.South: return walkerPosition.y >= walkerDestination.y;
-            case StepDirection.West: return walkerPosition.x <= walkerDestination.x;
+    _makeIdCoordsMap(idCoordsEntries: [string, PointData][]): Map<string, Phaser.Math.Vector2> {
+        const idCoordsData: [string, Phaser.Math.Vector2][] = idCoordsEntries.map(
+            ([vertexId, {x, y}]) => {
+                const scaledX = x * this.sceneWidth;
+                const scaledY = y * this.sceneHeight;
+
+                return [vertexId, new Phaser.Math.Vector2(scaledX, scaledY)];
+            }
+        )
+
+        return new Map<string, Phaser.Math.Vector2>(idCoordsData);
+    }
+
+    _calculateNeighborPointAngleDegrees(pointNeighborDx: number, pointNeighborDy: number): number {
+        const neighborPointAngleRadians = Math.atan2(pointNeighborDy, pointNeighborDx);
+        const neighborPointAngleDegrees = (neighborPointAngleRadians * 180) / Math.PI;
+
+        if (neighborPointAngleDegrees >= 0 && neighborPointAngleDegrees <= 90) {
+            return Math.abs(90 - neighborPointAngleDegrees);
+        } else if (neighborPointAngleDegrees >= 90 && neighborPointAngleDegrees <= 270) {
+            return -(neighborPointAngleDegrees - 90);
+        } else {
+            return Math.abs(neighborPointAngleDegrees - 360) + 90;
         }
     }
 
     create() {
-        this.pointGrid = new PointGrid(this.physics.world, this, pointsInCol, pointsInRow, xyOffset, pointTypeOverrides);
+        this.sceneWidth = Number(this.game.config.width);
+        this.sceneHeight = Number(this.game.config.height);
+        
+        const pointMapData = this.cache.json.get("walker_map");
+        
+        const verticesData = { ...pointMapData.boundaryVertices, ...pointMapData.diagramVertices };
+        const verticesEntries: [string, PointData][] = Object.entries(verticesData);
 
-        const colRowVector = new Phaser.Math.Vector2(playerStartColIndex, playerStartRowIndex);
-        const colRowCoordsVector = new Phaser.Math.Vector2((playerStartColIndex * this.pointGrid.sceneWidthInterval) + xyOffset, (playerStartRowIndex * this.pointGrid.sceneHeightInterval) + xyOffset);
+        this.verticesMap = this._makeIdCoordsMap(verticesEntries);
 
-        this.walker = new Walker(this, colRowVector, colRowCoordsVector, numWalkerSteps);
+        this.pointMap = new PointMap(this, pointTypeOverrides);
 
-        this.numDestinations = pointTypeOverrides.filter(({pointType}) => pointType === PointType.Destination).length;
+        const regionsData: RegionData[] = pointMapData.regions;
 
-        this.physics.add.overlap(this.walker, this.pointGrid, (walker, point) => {
-            const castWalker = walker as Walker;
-            const castPoint = point as Point;
+        const lineGraphics = this.add.graphics({ lineStyle: {width: 1, color: 0x000000 } });
+        const linesSoFar: [string, string][] = [];
+        
+        for (const { edges } of regionsData) {
+            for (const { vertexIdentifier0, vertexIdentifier1 } of edges) {
+                const vertex0 = this.verticesMap.get(vertexIdentifier0);
+                const vertex1 = this.verticesMap.get(vertexIdentifier1);
 
-            this.stepsText.setText(castWalker.remainingStepsString());
-            if (castWalker.remainingSteps <= 0) {
-                this.stepsText.setColor("red");
-                if (this.destinatationsArrivedAt < this.numDestinations) {
-                    this.destinationsText.setText("Out of steps..");
-                    this.destinationsText.setColor("red");
+                if (vertex0 && vertex1) {
+                    const identifier0Neighbors = this.neighborsMap.get(vertexIdentifier0);
+
+                    const identifier1Dx = vertex1.x - vertex0.x;
+                    const identifier1Dy = vertex1.y - vertex0.y;
+
+                    const identifier1AsNeighbor: PointNeighborData = {
+                        neighborPointId: vertexIdentifier1,
+                        neighborPointCoords: vertex1,
+                        neighborPointAngleDegrees: this._calculateNeighborPointAngleDegrees(identifier1Dx, identifier1Dy),
+                        neighborDx: identifier1Dx,
+                        neighborDy: identifier1Dy
+                    }
+
+                    if (identifier0Neighbors) {
+                        const alreadyIdentifier0Neighbor =
+                            identifier0Neighbors.find((identifier0Neighbor) => {
+                                return identifier0Neighbor.neighborPointId === vertexIdentifier1;
+                            });
+
+                        if (!alreadyIdentifier0Neighbor) {
+                            identifier0Neighbors.push(identifier1AsNeighbor);
+                        }
+                    } else {
+                        this.neighborsMap.set(vertexIdentifier0, [identifier1AsNeighbor]);
+                    }
+
+                    const identifier1Neighbors = this.neighborsMap.get(vertexIdentifier1);
+                    
+                    const identifier0Dx = vertex0.x - vertex1.x;
+                    const identifier0Dy = vertex0.y - vertex1.y;
+                    
+                    const identifier0AsNeighbor: PointNeighborData = {
+                        neighborPointId: vertexIdentifier0,
+                        neighborPointCoords: vertex0,
+                        neighborPointAngleDegrees: this._calculateNeighborPointAngleDegrees(identifier0Dx, identifier0Dy),
+                        neighborDx: identifier0Dx,
+                        neighborDy: identifier0Dy
+                    }
+
+                    if (identifier1Neighbors) {
+                        const alreadyIdentifier1Neighbor =
+                            identifier1Neighbors.find((identifier1Neighbor) => {
+                                return identifier1Neighbor.neighborPointId === vertexIdentifier0;
+                            }); 
+
+                        if (!alreadyIdentifier1Neighbor) {
+                            identifier1Neighbors.push(identifier0AsNeighbor);
+                        }
+                    } else {
+                        this.neighborsMap.set(vertexIdentifier1, [identifier0AsNeighbor]);
+                    }
+
+                    // Attempt to ensure that we don't draw lines connecting points more than once.
+                    const lineAlreadyAdded = linesSoFar.find(
+                        ([lineVertexId0, lineVertexId1]) => {
+                            return (lineVertexId0 === vertexIdentifier0 && lineVertexId1 === vertexIdentifier1) || (lineVertexId1 === vertexIdentifier0 && lineVertexId0 === vertexIdentifier1);
+                        }
+                    )
+
+                    if (!lineAlreadyAdded) {
+                        const neighborLine = new Phaser.Geom.Line(vertex0.x, vertex0.y, vertex1.x, vertex1.y);
+                        lineGraphics.strokeLineShape(neighborLine);
+                        linesSoFar.push([vertexIdentifier0, vertexIdentifier1]);
+                    } else {
+                        console.log("found");
+                    }
+                } else {
+                    console.log(`${vertexIdentifier0} and/or ${vertexIdentifier1} unexpectedly not found in ${this.verticesMap}`)
                 }
             }
+        }
 
-            switch(castPoint.pointType) {
-                case PointType.Default:
-                    if (this._determineWalkerOverlapWithDestination(castWalker)) {
-                        castWalker.handleArrivalAtDefaultPoint();
-                    }
-                    break;
-                case PointType.Destination:
-                    if (castWalker.steppingState !== SteppingState.NotStepping) {
-                        if (this._determineWalkerOverlapWithDestination(castWalker)) {
-                            this.destinationsText.setText("Arrived at destination!");
-                            this.destinationsText.setColor("green");
-                            
-                            castWalker.handleArrivalAtDestinationPoint();
-                        }
-                    }
-                    break;
-                case PointType.Block:
-                    // No overlap because we want the Walker to bounce off the Block.
-                    castWalker.handleArrivalAtBlockPoint();
-                    break;
-                case PointType.RedirectNorth:
-                    if (this._determineWalkerOverlapWithDestination(castWalker)) {
-                        castWalker.handleArrivalAtRedirectionPoint(StepDirection.North);
-                    }
-                    break;
-                case PointType.RedirectEast:
-                    if (this._determineWalkerOverlapWithDestination(castWalker)) {
-                        castWalker.handleArrivalAtRedirectionPoint(StepDirection.East);
-                    }
-                    break;
-                case PointType.RedirectSouth:
-                    if (this._determineWalkerOverlapWithDestination(castWalker)) {
-                        castWalker.handleArrivalAtRedirectionPoint(StepDirection.South);
-                    }
-                    break;
-                case PointType.RedirectWest:
-                    if (this._determineWalkerOverlapWithDestination(castWalker)) {
-                        castWalker.handleArrivalAtRedirectionPoint(StepDirection.West);
-                    }
-                    break;
-            }
-        });
+        const walkerStartCoords = this.verticesMap.get(playerStartPointId);
 
-        this.stepsText = this.add.text(0, 0, this.walker.remainingStepsString(), textStyle);
-        this.destinationsText = this.add.text(0, 15, "Walking towards destination..", textStyle);
+        if (walkerStartCoords) {
+            this.walker = new Walker(this, this.pointMap, walkerStartCoords, playerStartPointId, numWalkerSteps);
+            this.numDestinations = pointTypeOverrides.values().filter((pointType) => pointType === PointType.Destination).toArray().length;
 
-        this.walker.takeStep();
+            this.stepsText = this.add.text(0, 565, this.walker.remainingStepsString(), textStyle);
+            this.destinationsText = this.add.text(0, 580, "Walking..", textStyle);
+
+            this.walker.takeStep();
+        } else {
+            console.log(`${playerStartPointId} unexpectedly missing from ${this.verticesMap}; did not start`);
+        }
 
         EventBus.emit('current-scene-ready', this);
     }

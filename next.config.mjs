@@ -1,7 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-    output: 'export',
-    basePath: '/rampant-on-the-tracks-game-mechanics'
+    output: 'export'
 };
 
 export default nextConfig;

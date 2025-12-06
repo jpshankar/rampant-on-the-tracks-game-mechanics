@@ -2,10 +2,7 @@ enum PointType {
     Default,
     Destination,
     Block,
-    RedirectNorth, 
-    RedirectEast,
-    RedirectSouth,
-    RedirectWest
+    Redirect
 }
 
 export default PointType;

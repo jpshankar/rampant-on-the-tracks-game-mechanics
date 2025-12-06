@@ -1,173 +1,176 @@
 import GameMechanicsDemo from "@/game/scenes/GameMechanicsDemo";
 
-import PointGrid from "@/game/entities/points/PointGrid";
-
-import StepDirection from "./StepDirection";
-import NextStep from "./NextStep";
 import SteppingState from "./SteppingState";
 
-const baseStepDirections: StepDirection[] = [StepDirection.North, StepDirection.East, StepDirection.South, StepDirection.West];
+import Point from "../points/Point";
+import PointMap from "../points/PointMap";
+import PointNeighborData from "../points/PointNeighborData";
+import PointType from "../points/PointType";
 
-function invertStepDirection(stepDirection: StepDirection): StepDirection {
-    switch(stepDirection) {
-        case StepDirection.North: return StepDirection.South;
-        case StepDirection.East: return StepDirection.West;
-        case StepDirection.South: return StepDirection.North;
-        case StepDirection.West: return StepDirection.East;
-    }
-}
-
-const coordDelta = 0.35;
+// Scalar to ensure that tweening the Walker from point to point doesn't go too fast.
+const walkingDurationScale = 15;
 
 export default class Walker extends Phaser.Physics.Arcade.Image {
-    colRow: Phaser.Math.Vector2;
-    currentCoords: Phaser.Math.Vector2;
+    currentVertex: Phaser.Math.Vector2;
+    
+    mostRecentDestinationId: string;
 
     remainingSteps: number;
 
-    pointGrid: PointGrid;
+    verticesMap: Map<string, Phaser.Math.Vector2>;
+    neighborsMap: Map<string, PointNeighborData[]>;
 
     steppingState: SteppingState = SteppingState.NotStepping;
-    destinationCoords: Phaser.Math.Vector2;
+    
+    currentDestination: PointNeighborData;
+    previousDestinations: PointNeighborData[] = [];
 
-    previousStepDirections: StepDirection[] = [];
-    currentStepDirection: StepDirection;
+    containingScene: GameMechanicsDemo;
+    pointMap: PointMap;
 
-    _calculateDirectionNextStep(nextStepDirection: StepDirection): Phaser.Math.Vector2 {
-        switch(nextStepDirection) {
-            case StepDirection.North: return new Phaser.Math.Vector2(this.colRow.x, this.colRow.y - 1);
-            case StepDirection.East: return new Phaser.Math.Vector2(this.colRow.x + 1, this.colRow.y);
-            case StepDirection.South: return new Phaser.Math.Vector2(this.colRow.x, this.colRow.y + 1);
-            case StepDirection.West: return new Phaser.Math.Vector2(this.colRow.x - 1, this.colRow.y);
-        }
-    }
-    _calculateDestinationNextStep(nextStepColRow: Phaser.Math.Vector2): Phaser.Math.Vector2 {
-        return new Phaser.Math.Vector2((nextStepColRow.x * this.pointGrid.sceneWidthInterval) + this.pointGrid.pointGridOffset, (nextStepColRow.y * this.pointGrid.sceneHeightInterval) + this.pointGrid.pointGridOffset);
-    }
-
-    _calculateDirectionStepCoords(): Phaser.Math.Vector2 {
-        switch(this.currentStepDirection) {
-            case StepDirection.North: return new Phaser.Math.Vector2(this.currentCoords.x, this.currentCoords.y - coordDelta);
-            case StepDirection.East: return new Phaser.Math.Vector2(this.currentCoords.x + coordDelta, this.currentCoords.y);
-            case StepDirection.South: return new Phaser.Math.Vector2(this.currentCoords.x, this.currentCoords.y + coordDelta);
-            case StepDirection.West: return new Phaser.Math.Vector2(this.currentCoords.x - coordDelta, this.currentCoords.y);
-        }
-    }
-
-    constructor(scene: GameMechanicsDemo, colRow: Phaser.Math.Vector2, colRowCoords: Phaser.Math.Vector2, numSteps: number) {
-        super(scene, colRowCoords.x, colRowCoords.y, "walker");
+    constructor(scene: GameMechanicsDemo, pointMap: PointMap, startCoords: Phaser.Math.Vector2, startCoordsId: string, numSteps: number) {
+        super(scene, startCoords.x, startCoords.y, "walker");
 
         scene.add.existing(this);
-        scene.physics.add.existing(this);
 
-        this.colRow = colRow;
-        this.currentCoords = colRowCoords;
+        this.currentVertex = startCoords;
+        this.mostRecentDestinationId = startCoordsId;
 
         this.remainingSteps = numSteps;
 
-        this.pointGrid = scene.pointGrid;
+        this.verticesMap = scene.verticesMap;
+        this.neighborsMap = scene.neighborsMap;
+
+        this.containingScene = scene;
+        this.pointMap = pointMap;
+
+        // Keeps the Walker on top of everything in the grid, graphically.
+        this.setDepth(10);
     }
 
-    preUpdate() {
-        if (this.steppingState !== SteppingState.NotStepping) {
-            const nextCoords = this._calculateDirectionStepCoords();
-            this.setPosition(nextCoords.x, nextCoords.y);
-            this.currentCoords = nextCoords;
+    _updateRemainingSteps() {
+        this.remainingSteps -= 1;
+        this.containingScene.stepsText.setText(this.remainingStepsString());
+        if (this.remainingSteps <= 0) {
+            this.containingScene.stepsText.setColor("red");
+            if (this.containingScene.destinatationsArrivedAt < this.containingScene.numDestinations) {
+                this.containingScene.destinationsText.setText("Out of steps..");
+                this.containingScene.destinationsText.setColor("red");
+            }
         }
     }
 
-    _stepDestinationIsWithinGrid(stepDestination: Phaser.Math.Vector2): boolean {
-        return stepDestination.x >= 0 && stepDestination.x <= this.pointGrid.colsNum - 1 && stepDestination.y >= 0 && stepDestination.y <= this.pointGrid.rowsNum - 1;
+    getPointById(pointId: string): Point | undefined {
+        const findPointResult = this.pointMap.getMatching("pointId", pointId);
+        if (findPointResult.length) {
+            return findPointResult[0];
+        } else {
+            return undefined;
+        }
+    }
+
+    _setOutTweening(destination: PointNeighborData, steppingState: SteppingState) {
+        if (this.currentDestination) {
+            this.mostRecentDestinationId = this.currentDestination.neighborPointId;
+        }
+        this.currentDestination = destination;
+
+        this._updateRemainingSteps();
+        this.steppingState = steppingState;
+
+        const distanceToDestination = Phaser.Math.Distance.BetweenPoints(this.currentVertex, this.currentDestination.neighborPointCoords);
+
+        this.scene.tweens.add(
+            {
+                targets: this,
+                x: destination.neighborPointCoords.x,
+                y: destination.neighborPointCoords.y,
+                duration: distanceToDestination * walkingDurationScale,
+                onUpdate: function(_: Phaser.Tweens.Tween, target: Walker, key, current) {
+                    const updatedVertex = target.currentVertex.clone();
+                    if (key === "x") {
+                        target.setX(current);
+                        updatedVertex.x = current;
+                    } else if (key === "y") {
+                        target.setY(current);
+                        updatedVertex.y = current;
+                    }
+
+                    target.currentVertex = updatedVertex;
+                },
+                onComplete: function(_: Phaser.Tweens.Tween, __: any, target: Walker) {
+                    target.steppingState = SteppingState.NotStepping;
+                    
+                    const destinationPointId = target.currentDestination.neighborPointId
+                    const destinationPoint = target.getPointById(destinationPointId);
+
+                    if (destinationPoint) {
+                        switch (destinationPoint.pointType) {
+                            case PointType.Default:
+                                target.handleArrivalAtDefaultPoint();
+                                break;
+                            case PointType.Destination:
+                                target.containingScene.destinationsText.setText("Arrived at destination!");
+                                target.containingScene.destinationsText.setColor("green");
+                                break;
+                            case PointType.Block:
+                                target.handleArrivalAtBlockPoint();
+                                break;
+                            case PointType.Redirect:
+                                target.handleArrivalAtRedirectionPoint(destinationPoint.redirectionDestinations[0]);
+                                break;
+                        }
+                    } else {
+                        console.log(`Unexpectedly unable to find point ${destinationPointId} in ${target.pointMap}`)
+                    }
+                }, 
+                onCompleteParams: [this]
+            }
+        )
     }
 
     takeStep() {
         if (this.steppingState === SteppingState.NotStepping) {
-            const maybePreviousStep = this.previousStepDirections.at(-1);
-
-            const maybeNextSteps: NextStep[] = 
-                baseStepDirections
-                    .filter((baseStepDirection) => {
-                        return !maybePreviousStep || (maybePreviousStep && baseStepDirection !== invertStepDirection(maybePreviousStep))
-                    })
-                    .map((likelyNextStep) => {
-                        const nextStepDestination = this._calculateDirectionNextStep(likelyNextStep);
-                        return { stepDirection: likelyNextStep, stepDestination: nextStepDestination}
-                    });
-
-            const likelyNextSteps = 
-                Array.from(maybeNextSteps)
-                    .filter(({stepDestination}) => {
-                        return this._stepDestinationIsWithinGrid(stepDestination);
-                    });
-
-            const nextStep = Phaser.Math.RND.pick(likelyNextSteps);
-            const { stepDirection: nextStepDir, stepDestination: nextStepDestination } = nextStep;
-
-            const nextStepDestinationCoords = this._calculateDestinationNextStep(nextStepDestination);
-
-            this.currentStepDirection = nextStepDir;
+            const mostRecentVertexNeighbors = this.neighborsMap.get(this.mostRecentDestinationId) || [];
+            const likelyNextSteps = mostRecentVertexNeighbors.filter(({neighborPointId}) => neighborPointId != this.mostRecentDestinationId);
             
-            this.colRow = nextStepDestination;
-            this.destinationCoords = nextStepDestinationCoords;
-
-            this.remainingSteps -= 1;
-            this.steppingState = SteppingState.Walking;
-        }
+            const nextStep = Phaser.Math.RND.pick(likelyNextSteps);
+            this._setOutTweening(nextStep, SteppingState.Walking);
+       }
     }
 
     handleArrivalAtDefaultPoint() {
-        this.steppingState = SteppingState.NotStepping;
         if (this.remainingSteps > 0) {
-            this.previousStepDirections.push(this.currentStepDirection);
+            this.previousDestinations.push(this.currentDestination);
+            this.mostRecentDestinationId = this.currentDestination.neighborPointId;
             this.takeStep();
         }
     }
 
     handleArrivalAtBlockPoint() {
         if (this.remainingSteps > 0 && this.steppingState !== SteppingState.Reversing) {
-            this.steppingState = SteppingState.NotStepping;
-            this.previousStepDirections.push(this.currentStepDirection);
-            
-            const reverseDirection = invertStepDirection(this.currentStepDirection);
-            const reverseStep = this._calculateDirectionNextStep(reverseDirection);
+            const previousDestination = this.previousDestinations.at(-1);
 
-            const reverseCoords = this._calculateDestinationNextStep(reverseStep);
+            this.previousDestinations.push(this.currentDestination);
+            if (previousDestination) {
+                this._setOutTweening(previousDestination, SteppingState.Reversing);
+            } else {
+                // If !previousDestination, then this is a block from the first step and we have to retrieve the start point.
+                const blockNeighbors = this.neighborsMap.get(this.currentDestination.neighborPointId) || [];
+                const previousPoint = blockNeighbors.filter(({neighborPointId}) => neighborPointId === this.mostRecentDestinationId)[0];
 
-            this.colRow = reverseStep;
-            this.destinationCoords = reverseCoords;
-
-            this.remainingSteps -= 1;
-            this.previousStepDirections.push(this.currentStepDirection);
-
-            this.currentStepDirection = reverseDirection;
-            
-            this.steppingState = SteppingState.Reversing;
+                if (previousPoint) {
+                    this._setOutTweening(previousPoint, SteppingState.Reversing);
+                } else {
+                    console.log(`Unexpectedly unable to find previous destination ${this.mostRecentDestinationId} from Block ${this.currentDestination.neighborPointId} neighbors ${blockNeighbors}`)
+                }
+            }
         }
     }
 
-    handleArrivalAtDestinationPoint() {
-        this.steppingState = SteppingState.NotStepping;
-    }
-
-    handleArrivalAtRedirectionPoint(pointDirection: StepDirection) {
+    handleArrivalAtRedirectionPoint(redirectionDestination: PointNeighborData) {
         if (this.remainingSteps > 0) {
-            const redirectStep = this._calculateDirectionNextStep(pointDirection);
-
-            if (this._stepDestinationIsWithinGrid(redirectStep)) {
-                const redirectCoords = this._calculateDestinationNextStep(redirectStep);
-
-                // This will prevent duplicate action on a given Redirect site, but not any action on an immediately following one.
-                if (redirectCoords.x !== this.destinationCoords.x || redirectCoords.y !== this.destinationCoords.y) {
-                    this.colRow = redirectStep;
-                    this.destinationCoords = redirectCoords;
-
-                    this.remainingSteps -= 1;
-                    this.previousStepDirections.push(this.currentStepDirection);
-
-                    this.currentStepDirection = pointDirection;
-                    this.steppingState = SteppingState.Redirecting;
-                }
-            }
+            this._setOutTweening(redirectionDestination, SteppingState.Walking);
         }
     }
 
